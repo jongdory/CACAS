@@ -4,7 +4,7 @@
 
 #### Overview
 
-![fig1](C:\Users\jhkim\Desktop\CASCA\img\fig1.png)
+![fig1](/img/fig1.png)
 
 
 
