@@ -1,4 +1,4 @@
-## Carotid Artery Segmentation using Center point Annotation
+# Carotid Artery Segmentation using Center point Annotation
 
 ------
 
@@ -8,7 +8,7 @@
 
 
 
-#### Dataset
+### Dataset
 
 We used CosMos 2022 Challenge Dataset
 please download the dataset through this
@@ -19,9 +19,9 @@ please download the dataset through this
 
 
 
-#### How to use
+### How to use
 
 1. 
 2. 
 
-#### Citation
+### Citation
