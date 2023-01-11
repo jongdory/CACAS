@@ -115,7 +115,7 @@ class CenterDistanceLoss(nn.Module):
     def forward(self,
                 probs: torch.Tensor,
                 targets: list[torch.Tensor, torch.Tensor],
-                radiuses: list[int,int],
+                radiuses: np.array,
                 ) -> torch.Tensor:
         """
         Params:
@@ -189,7 +189,7 @@ class RadiusConstraintLoss(nn.Module):
     def forward(self,
                 probs: torch.Tensor,
                 targets: list[torch.Tensor, torch.Tensor],
-                radiuses: list[int,int],
+                radiuses: np.array,
                 ) -> torch.Tensor:
         """
         Params:
@@ -230,7 +230,7 @@ class RadiusConstraintLoss(nn.Module):
             # Match the shape for matmul
             d2 = rearrange(d2, "w h (b c) d -> b c d w h", c=1)
             # Calculate Exponential distance for out boundary
-            dout = self.relu((torch.exp((d2/radius - 1)) - 1))
+            dout = self.relu((torch.exp((d2/radius[1] - 1)) - 1))
             dout[dout > 0] = 1
             art_masks.append(dout)
 
@@ -248,8 +248,8 @@ class RadiusConstraintLoss(nn.Module):
             d2 = rearrange(d2, "w h (b c) d -> b c d w h", c=1)
 
             # Calculate Exponential distance for out boundary
-            lu_dout = self.relu(1 - torch.exp(1 -d2/(radius-2.5)))/self.alpha * mask
-            ow_dout = self.relu(1 - torch.exp(1 -d2/ radius     ))/self.alpha * mask
+            lu_dout = self.relu(1 - torch.exp(1 -d2/radius[0]))/self.alpha * mask
+            ow_dout = self.relu(1 - torch.exp(1 -d2/radius[1]))/self.alpha * mask
             lu_dout = lu_dout * art_mask
             ow_dout = ow_dout * art_mask
             lu_rc_out = (lu_dout*probs[:,:1]).sum(axis=(1,3,4)) / (probs[:,:1].sum(axis=(1,3,4)) + self.eps)
@@ -258,10 +258,10 @@ class RadiusConstraintLoss(nn.Module):
 
             # Calculate Exponential distance for in boundary
             ''' lumen's radius = outer wall's radius - 3'''
-            lu_din  = self.relu(torch.exp(1 - d2/(radius-2.5)) - 1) * mask
-            ow_din  = self.relu(torch.exp(1 - d2/ radius   ) - 1) * mask
-            lu_rc_in = (lu_din*(1-probs[:,:1])).sum(axis=(1,3,4)) / (probs[:,:1].sum(axis=(1,3,4)) + self.eps)
-            ow_rc_in = (ow_din*(1-probs[:,1:])).sum(axis=(1,3,4)) / (probs[:,1:].sum(axis=(1,3,4)) + self.eps)
+            lu_din  = self.relu(torch.exp(1 - d2/radius[0]) - 1) * mask
+            ow_din  = self.relu(torch.exp(1 - d2/radius[1]) - 1) * mask
+            lu_rc_in = (lu_din*(1-probs[:,:1])).sum(axis=(1,3,4)) / (radius[0] * radius[0] * torch.pi)
+            ow_rc_in = (ow_din*(1-probs[:,1:])).sum(axis=(1,3,4)) / (radius[1] * radius[1] * torch.pi)
             rc_in = lu_rc_in + ow_rc_in
 
             loss = loss + rc_out.mean() + rc_in.mean()
@@ -316,7 +316,7 @@ class TotalLoss(nn.Module):
     def forward(self, 
                 logits: torch.Tensor,
                 centerlines: torch.Tensor,
-                radiuses: list[float,float]) -> torch.Tensor:
+                radiuses: np.array) -> torch.Tensor:
         """
         Params:
             logits: model outputs
@@ -377,7 +377,7 @@ class TotalSegLoss(nn.Module):
                 labels: torch.Tensor,
                 maskmats: torch.Tensor,
                 centerlines: torch.Tensor,
-                radiuses: list[float,float]) -> torch.Tensor:
+                radiuses: np.array) -> torch.Tensor:
         """
         Params:
             logits: model outputs
