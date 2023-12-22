@@ -1,7 +1,5 @@
 # Carotid Artery Segmentation using Center point Annotation
 
-------
-
 #### Overview
 
 ![fig1](/asset/fig1.png)
