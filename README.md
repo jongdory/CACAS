@@ -23,14 +23,18 @@ please download the dataset through this
 ### How to use
 
 1. Download the data set from the link above and preprocess the dataset
+
 2. Extract the center point from the given label
+
 3. Make a learning plan using Totalloss at loss.py.
+
+   
 
 ### Citation
 
 If you find this repo useful for your research, please consider citing our paper:
 
-```
+```bibtex
 @inproceedings{,
   title={},
   author={},
