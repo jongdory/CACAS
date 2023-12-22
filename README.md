@@ -4,7 +4,7 @@
 
 #### Overview
 
-![fig1](/img/fig1.png)
+![fig1](/asset/fig1.png)
 
 
 
