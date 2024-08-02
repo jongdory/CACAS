@@ -6,9 +6,7 @@
 
 
 
-### Dataset
-
-------
+## Dataset
 
 We used CosMos 2022 Challenge Dataset
 
@@ -20,9 +18,7 @@ please download the dataset through this
 
 
 
-### How to use
-
-------
+## How to use
 
 1. Download the data set from the link above and preprocess the dataset
 
@@ -33,9 +29,7 @@ please download the dataset through this
 
 
 
-### Train
-
-------
+## Train
 
 ```shell
 python main.py --mode total --model Unet3D --fold 0 
@@ -43,9 +37,7 @@ python main.py --mode total --model Unet3D --fold 0
 
 
 
-### Citation
-
-------
+## Citation
 
 If you find this repo useful for your research, please consider citing our paper:
 
