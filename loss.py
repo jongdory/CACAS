@@ -8,6 +8,190 @@ import SimpleITK as sitk
 from einops import rearrange, reduce, repeat
 
 
+def dice_coef_metric(probabilities: torch.Tensor,
+                     truth: torch.Tensor,
+                     eps: float = 1e-8,
+                     maskmats: torch.Tensor = None) -> np.ndarray:
+    """
+    Calculate Dice score for data batch.
+    Params:
+        probobilities: model outputs after activation function.
+        truth: truth values.
+        threshold: threshold for probabilities.
+        eps: additive to refine the estimate.
+        Returns: dice score aka f1.
+    """
+    num = truth.size(0)
+    probabilities = probabilities.to("cuda")
+    truth = truth.to("cuda")
+    maskmats = maskmats.to("cuda")
+
+    probabilities = probabilities.view(num, -1)
+    truth = truth.view(num, -1)
+    maskmats = maskmats.view(num,-1)
+    truth = torch.mul(truth, maskmats)
+    probabilities = torch.mul(probabilities, maskmats)
+    
+    intersection = 2.0 * (probabilities * truth).sum()
+    union = probabilities.sum() + truth.sum()
+    dice = (intersection + eps) / (union + eps)
+
+    return dice.cpu().numpy()
+
+
+def binary_cross_entropy_metric(logits: torch.Tensor,
+               truth: torch.Tensor,
+               maskmats: torch.Tensor = None) -> np.ndarray:
+
+    assert(logits.shape == truth.shape)
+
+    logits = logits.to("cuda")
+    truth = truth.to("cuda")
+    maskmats = maskmats.to("cuda")
+
+    bce = nn.BCEWithLogitsLoss(pos_weight=maskmats)(logits, truth)
+
+    return bce.cpu().numpy()
+
+
+def center_distance_metric(probabilities: torch.Tensor,
+               eps: float = 1e-8,
+               centerlines: torch.Tensor = None) -> np.ndarray:
+
+    negpair = torch.tensor([-1,-1]).to("cuda")
+
+    probabilities = probabilities.to("cuda")
+    centerlines   = centerlines.to("cuda")
+
+    targets = []
+    for i in [1,2]:
+        target = torch.stack([torch.argwhere(centerlines[b,0,h] == i)[0] if len(torch.argwhere(centerlines[b,0,h]==i))==1 else torch.tensor([-1,-1]).to("cuda") for b in range(centerlines.shape[0]) for h in range(centerlines.shape[2])]).to("cuda")
+        target = target.view(-1, probabilities.shape[2], 2).type(torch.cuda.FloatTensor)
+        targets.append(target)
+
+    y = torch.arange(probabilities.shape[-2])
+    x = torch.arange(probabilities.shape[-1])
+    grid_y, grid_x = torch.meshgrid(y, x, indexing='ij')
+
+    grid_y, grid_x = grid_y.to("cuda"), grid_x.to("cuda")
+
+    l2dist = nn.PairwiseDistance(p=2, eps=eps)
+
+    probs  = [probabilities, probabilities]
+    loss = torch.tensor(0.0).to("cuda")
+
+    for prob, target in zip(probs, targets):
+        y_cnt = (grid_y*prob).sum(axis=(1,3,4)) / (prob.sum(axis=(1,3,4)) + eps)
+        x_cnt = (grid_x*prob).sum(axis=(1,3,4)) / (prob.sum(axis=(1,3,4)) + eps)
+        cnt  = torch.cat((y_cnt[:,:,None], x_cnt[:,:,None]),axis=2)
+
+        l2 = l2dist(cnt, target) * (target != negpair)[:,:,0]
+        loss += l2.mean()
+
+    return loss.cpu().numpy()
+
+
+
+def radius_constraint_metric(probabilities: torch.Tensor,
+               eps: float = 1e-8,
+               centerlines: torch.Tensor = None,
+               radiuses: np.array = None) -> np.ndarray:
+
+    negpair = torch.tensor([-1,-1]).to("cuda")
+    relu = nn.ReLU()
+    l2dist = nn.PairwiseDistance(p=2, eps=eps)
+    alpha = 6
+
+    y = torch.arange(probabilities.shape[-2])
+    x = torch.arange(probabilities.shape[-1])
+    grid_y, grid_x = torch.meshgrid(y, x, indexing='ij')
+    grid = torch.cat((grid_y[:,:,None], grid_x[:,:,None]), axis=2)
+    grid = repeat(grid,"w h yx -> w h b d yx", b=probabilities.shape[0], d= probabilities.shape[2]).to("cuda")
+
+    probabilities = probabilities.to("cuda")
+    centerlines   = centerlines.to("cuda")
+
+    targets = []
+    for i in [1,2]:
+        target = torch.stack([torch.argwhere(centerlines[b,0,h] == i)[0] if len(torch.argwhere(centerlines[b,0,h]==i))==1 else torch.tensor([-1,-1]).to("cuda") for b in range(centerlines.shape[0]) for h in range(centerlines.shape[2])]).to("cuda")
+        target = target.view(-1, probabilities.shape[2], 2).type(torch.cuda.FloatTensor)
+        targets.append(target)
+
+    probs  = [probabilities, probabilities]
+    lds = [1, 25]
+    loss = torch.tensor(0.0).to("cuda")
+
+    for prob, target, radius, ld in zip(probs, targets, radiuses, lds):
+        # Masking where there's no center line
+        mask = (target != negpair)
+        mask = repeat(mask[:,:,0], "b z -> b c z y x", c=1, y = prob.shape[3], x =prob.shape[4]) 
+
+        # calculate L2 distance
+        d2 = l2dist(grid, target)
+
+        # Match the shape for matmul
+        d2 = rearrange(d2, "w h (b c) d -> b c d w h", c=1)
+        # Calculate Exponential distance for out boundary
+        dout = relu((torch.exp((d2/radius[1] - 1)/alpha) - 1)*mask)
+        rc_out = (dout*prob).sum(axis=(1,3,4)) / (prob.sum(axis=(1,3,4)) + eps)
+
+        # Calculate Exponential distance for in boundary
+        ''' lumen's radius = outer wall's radius - 3'''
+        lu_din  = relu((torch.exp(1-d2/radius[0])-1)*mask)
+        ow_din  = relu((torch.exp(1-d2/radius[1])-1)*mask)
+        lu_rc_in = (lu_din*(1-prob[:,:1])).sum(axis=(1,3,4)) / (radius[0] * radius[0] * torch.pi)
+        ow_rc_in = (ow_din*(1-prob[:,1:])).sum(axis=(1,3,4)) / (radius[1] * radius[1] * torch.pi)
+        rc_in = lu_rc_in + ow_rc_in
+
+        loss += ld*(rc_out.mean() + rc_in.mean())
+
+    return loss.cpu().numpy()
+
+
+class Meter:
+    '''factory for storing and updating dice, bce, cent and cnst scores.'''
+    def __init__(self, 
+                 treshold: float = 0.5):
+        self.threshold: float = treshold
+        self.dice_scores: list = []
+        self.bce_scores: list = []
+        self.cent_scores: list = []
+        self.cnst_scores: list = []
+    
+    def update(self, 
+               logits: torch.Tensor, 
+               targets: torch.Tensor, 
+               maskmats: torch.Tensor,
+               centerlines: torch.Tensor,
+               radiuses: np.array):
+        """
+        Takes: logits from output model and targets,
+        calculates dice, bce, cent and cnst scores, and stores them in lists.
+        """
+
+        probs = torch.sigmoid(logits)
+        dice = dice_coef_metric(probs, targets, maskmats=maskmats)
+        bce  = binary_cross_entropy_metric(logits, targets, maskmats=maskmats)
+        cent = center_distance_metric(probs, centerlines=centerlines)
+        cnst = radius_constraint_metric(probs, centerlines=centerlines, radiuses=radiuses)
+        
+        self.dice_scores.append(dice)
+        self.bce_scores.append(bce)
+        self.cent_scores.append(cent)
+        self.cnst_scores.append(cnst)
+    
+    def get_metrics(self) -> np.ndarray:
+        """
+        Returns: the average of the accumulated dice, bce, cent and cnst scores.
+        """
+        dice = np.mean(self.dice_scores)
+        bce  = np.mean(self.bce_scores)
+        cent  = np.mean(self.cent_scores)
+        cnst  = np.mean(self.cnst_scores)
+
+        return dice, bce, cent, cnst
+
+
 class MaskedDiceLoss(nn.Module):
     """Calculate DICE score"""
     def __init__(self, eps: float = 1e-8):
@@ -91,10 +275,11 @@ class CenterDistanceLoss(nn.Module):
     """
     Calculate center distance loss for data batch.
     """
-    def __init__(self, shape):
+    def __init__(self, shape, device):
         """
         Params:
             grid_y, grid_x: meshgrid
+            device: Variables for parameters optimized for cuda
             eps: Epsilon, default = 1e-8
             l2dist: Pair wise Distance(L2 Distance)
             negpair: Mask for region without center line
@@ -105,11 +290,12 @@ class CenterDistanceLoss(nn.Module):
         x = torch.arange(shape[1])
         grid_y, grid_x = torch.meshgrid(y, x, indexing='ij')
 
-        self.grid_y, self.grid_x = grid_y.to("cuda"), grid_x.to("cuda")
-        self.grid = torch.cat((self.grid_y[:,:,None], self.grid_x[:,:,None]), axis=2).to("cuda")
+        self.grid_y, self.grid_x = grid_y.to(device), grid_x.to(device)
+        self.grid = torch.cat((self.grid_y[:,:,None], self.grid_x[:,:,None]), axis=2).to(device)
+        self.device = device
         self.eps = 1e-6
         self.l2dist = nn.PairwiseDistance(p=2, eps=self.eps)
-        self.negpair = torch.tensor([-1,-1]).to("cuda")
+        self.negpair = torch.tensor([-1,-1]).to(device)
         self.relu  = nn.ReLU()
 
     def forward(self,
@@ -129,7 +315,7 @@ class CenterDistanceLoss(nn.Module):
         Returns: L2 Distance between predict and target
         """
 
-        loss = torch.tensor(0.0).to("cuda")
+        loss = torch.tensor(0.0).to(self.device)
 
         art_masks = []
         grid = repeat(self.grid, "w h yx -> w h b d yx", b=probs.shape[0], d= probs.shape[2])
@@ -139,7 +325,7 @@ class CenterDistanceLoss(nn.Module):
             # Match the shape for matmul
             d2 = rearrange(d2, "w h (b c) d -> b c d w h", c=1)
             # Calculate Exponential distance for out boundary
-            dout = self.relu((torch.exp((d2/radius - 1)) - 1))
+            dout = self.relu((torch.exp((d2/radius[1] - 1)) - 1))
             dout[dout > 0] = 1
             art_masks.append(dout)
 
@@ -163,10 +349,11 @@ class RadiusConstraintLoss(nn.Module):
     Calculate Proximity loss.
     Loss that constraint the predicted voxel at the center point to be within the radius
     """
-    def __init__(self, shape):
+    def __init__(self, shape, device):
         """
         Params:
             grid, grid_y, grid_x: meshgrid
+            device: Variables for parameters optimized for cuda
             alpha: scaling factor for the distance out boundary
             eps: Epsilon, default = 1e-8
             l2dist: Pair wise Distance(L2 Distance)
@@ -179,10 +366,11 @@ class RadiusConstraintLoss(nn.Module):
         x = torch.arange(shape[1])
 
         grid_y, grid_x = torch.meshgrid(y, x, indexing='ij')
-        self.grid = torch.cat((grid_y[:,:,None], grid_x[:,:,None]), axis=2).to("cuda")
+        self.grid = torch.cat((grid_y[:,:,None], grid_x[:,:,None]), axis=2).to(device)
+        self.device = device
         self.alpha = 5
         self.eps   = 1e-6
-        self.negpair = torch.tensor([-1,-1]).to("cuda")
+        self.negpair = torch.tensor([-1,-1]).to(device)
         self.l2dist = nn.PairwiseDistance(p=2, eps=self.eps)
         self.relu  = nn.ReLU()
 
@@ -219,7 +407,7 @@ class RadiusConstraintLoss(nn.Module):
         Returns: loss
         """
 
-        loss = torch.tensor(0.0).to("cuda")
+        loss = torch.tensor(0.0).to(self.device)
         
         art_masks = []
         grid = repeat(self.grid, "w h yx -> w h b d yx", b=probs.shape[0], d= probs.shape[2])
@@ -277,7 +465,7 @@ class ConsistencyLoss(nn.Module):
         Params:
             T: Temperature parameter
         """
-        self.T = 0.7
+        self.T = 10
 
     def forward(self, logits: torch.Tensor) -> torch.Tensor:        
         """
@@ -301,7 +489,7 @@ class ConsistencyLoss(nn.Module):
 
 class TotalLoss(nn.Module):
     """Compute objective loss: CenterDistance Loss + RadiusConstraint Loss + Consistency Loss"""
-    def __init__(self, shape):
+    def __init__(self, shape, device, mode):
         super(TotalLoss, self).__init__()
         """
         Params:
@@ -309,25 +497,23 @@ class TotalLoss(nn.Module):
             cnst: Radius Constraint Loss
             csis: Consistency Loss
         """
-        self.cent = CenterDistanceLoss(shape)
-        self.cnst = RadiusConstraintLoss(shape)
+        self.mode = mode
+        self.device = device
+        self.cent = CenterDistanceLoss(shape, device)
+        self.cnst = RadiusConstraintLoss(shape, device)
         self.csis = ConsistencyLoss()
 
     def forward(self, 
                 logits: torch.Tensor,
+                targets: torch.Tensor,
+                maskmats: torch.Tensor,
                 centerlines: torch.Tensor,
-                radiuses: np.array) -> torch.Tensor:
+                radiuses: np.array,
+                epoch: int) -> torch.Tensor:
         """
         Params:
-            logits: model outputs
-            centerlines: Centerline in 3D space
-            radiuses: radius of lumen and wall
             ld: lambda, Weight of each loss
-            targets: position of the centerline, [target_i, target_e]
-                target_i: target center points of ICA. 
-                target_e: target center points of ECA. 
             loss: CenterDistance Loss + RadiusConstraint Loss + Consistency Loss
-
         Returns: loss
         """
         ld1, ld2, ld3 = 0.02, 1, 0.001
@@ -339,10 +525,10 @@ class TotalLoss(nn.Module):
             target = torch.stack([
                 torch.argwhere(centerlines[b,0,h] == i)[0] 
                 if len(torch.argwhere(centerlines[b,0,h]==i))==1 
-                else torch.tensor([-1,-1]).to("cuda") 
+                else torch.tensor([-1,-1]).to(self.device)
                 for b in range(centerlines.shape[0]) 
                 for h in range(centerlines.shape[2])
-            ]).to("cuda")
+            ]).to(self.device)
 
             target = target.view(-1, logits.shape[2], 2).type(torch.cuda.FloatTensor)
             targets.append(target)
@@ -351,68 +537,15 @@ class TotalLoss(nn.Module):
         loss_cnst = self.cnst(probs, targets=targets, radiuses=radiuses)
         loss_csis = self.csis(logits)
         
-        loss = ld1*loss_cent + ld2*loss_cnst + ld3*loss_csis  
-
-        return loss
-
-
-
-class TotalSegLoss(nn.Module):
-    """Compute objective loss: CenterDistance Loss + RadiusConstraint Loss + Consistency Loss"""
-    def __init__(self, shape):
-        super(TotalSegLoss, self).__init__()
-        """
-        Params:
-            cent: Center Distance Loss
-            cnst: Radius Constraint Loss
-            csis: Consistency Loss
-        """
-        self.seg  = MaskedDiceBCELoss()
-        self.cent = CenterDistanceLoss(shape)
-        self.cnst = RadiusConstraintLoss(shape)
-        self.csis = ConsistencyLoss()
-
-    def forward(self, 
-                logits: torch.Tensor,
-                labels: torch.Tensor,
-                maskmats: torch.Tensor,
-                centerlines: torch.Tensor,
-                radiuses: np.array) -> torch.Tensor:
-        """
-        Params:
-            logits: model outputs
-            centerlines: Centerline in 3D space
-            radiuses: radius of lumen and wall
-            ld: lambda, Weight of each loss
-            targets: position of the centerline, [target_i, target_e]
-                target_i: target center points of ICA. 
-                target_e: target center points of ECA. 
-            loss: CenterDistance Loss + RadiusConstraint Loss + Consistency Loss + Supervised Loss(DICE + BCE)
-
-        Returns: loss
-        """
-        ld1, ld2, ld3 = 0.1, 1, 0.001
-
-        probs = torch.sigmoid(logits)
-        targets = []
-
-        for i in [1,2]:
-            target = torch.stack([
-                torch.argwhere(centerlines[b,0,h] == i)[0] 
-                if len(torch.argwhere(centerlines[b,0,h]==i))==1 
-                else torch.tensor([-1,-1]).to("cuda") 
-                for b in range(centerlines.shape[0]) 
-                for h in range(centerlines.shape[2])
-            ]).to("cuda")
-
-            target = target.view(-1, logits.shape[2], 2).type(torch.cuda.FloatTensor)
-            targets.append(target)
-
-        loss_seg  = self.seg(logits, labels, maskmats)
-        loss_cent = self.cent(probs, targets=targets, radiuses=radiuses)
-        loss_cnst = self.cnst(probs, targets=targets, radiuses=radiuses)
-        loss_csis = self.csis(logits)
-
-        loss = ld1*loss_cent + ld2*loss_cnst + ld3*loss_csis + loss_seg
+        if self.mode == "centd":
+            loss = loss_cent
+        elif self.mode == "cnst":
+            loss = ld2*loss_cnst
+        elif self.mode == "centd_cnst":
+            loss = ld1*loss_cent + ld2*loss_cnst
+        elif self.mode == "total":
+            loss = ld1*loss_cent + ld2*loss_cnst + ld3*loss_csis  
 
         return loss, loss
+
+    

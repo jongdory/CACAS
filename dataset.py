@@ -48,7 +48,7 @@ def get_dataloader(
 class CarotidDataset(Dataset):
     def __init__(self, 
                  path: str = "", 
-                 phase: str = "test",
+                 phase: str = "train",
                  fold: int = 0,
                  seed: int = 55,):
         
@@ -106,7 +106,7 @@ class CarotidDataset(Dataset):
                 Image       = tio.ScalarImage(f"{path}/img.nii.gz"), 
                 Mask        = tio.LabelMap(f"{path}/roi.nii.gz"), 
                 CenterLine  = tio.LabelMap(f"{path}/centerline.nii.gz"),
-                WeightMat   = tio.LabelMap(f"{path}/weightmat.nii.gz"),
+                WeightMat   = tio.LabelMap(f"{path}/weightmat2.nii.gz"),
             )
         augmented = self.augmentations(subject)
         
@@ -175,6 +175,55 @@ class CarotidDataset(Dataset):
         mask = np.stack([mask_lu, mask_ow]).squeeze()
 
         return mask
+
+class CarotidTestDataset(Dataset):
+    def __init__(self, 
+                 path: str = "", 
+                 phase: str = "test",
+                 fold: int = 0,
+                 seed: int = 55,
+                 sparse: int = 20,):
+        
+        self.path = path
+        self.subs = os.listdir(self.path)
+
+        self.pathlist = self.__getlist__()
+        self.augmentations = get_augmentations("test")
+        
+
+    def __len__(self):
+        return len(self.pathlist) 
+
+
+    def __getlist__(self):
+        pathlist = []
+        sub_list = os.listdir(self.path)
+
+        for sub_i in sub_list:
+            sub_path = os.path.join(self.path, sub_i)
+
+            pathlist.append(sub_path)
+
+        return pathlist
+    
+
+    def __getitem__(self, idx):
+        id_ = idx
+        path = self.pathlist[idx]
+
+        subject = tio.Subject(
+                Image = tio.ScalarImage(f"{path}/img.nii.gz"), 
+            )
+        augmented = self.augmentations(subject)
+        
+        img = augmented['Image'].data.numpy().astype(np.float32)
+
+        img  = rearrange( img, 'c b h d -> c d h b')
+
+        return {
+            "Id": id_,
+            "image": img,
+        }
 
 
 def center_of_mass(input):
