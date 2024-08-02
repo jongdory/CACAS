@@ -42,12 +42,12 @@ python main.py --mode total --model Unet3D --fold 0
 If you find this repo useful for your research, please consider citing our paper:
 
 ```bibtex
-@inproceedings{,
+@article{
   title={},
   author={},
-  booktitle={},
+  journal={},
   pages={},
-  year={2023},
-  organization={}
+  year={2024},
+  publisher={}
 }
 ```
