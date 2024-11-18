@@ -37,17 +37,7 @@ python main.py --mode total --model Unet3D --fold 0
 
 
 
-## Citation
+## **Pretrained Model**
 
-If you find this repo useful for your research, please consider citing our paper:
+model weight: [google drive](https://drive.google.com/file/d/1DJba-5Kl8sSKq8aWQTYHuY8-8VlEzg37/view?usp=drive_link)
 
-```bibtex
-@article{
-  title={},
-  author={},
-  journal={},
-  pages={},
-  year={2024},
-  publisher={}
-}
-```
